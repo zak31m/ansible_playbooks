@@ -1,0 +1,79 @@
+---
+- name: Enable SELinux in permissive and autorelabel
+  hosts: all
+  strategy: free 
+  gather_facts: true
+  gather_subset:
+    - '!all'
+    - '!min'
+    - selinux
+    - distribution
+  tasks:
+    - name: Set SELinux to permissive
+      ansible.builtin.replace:
+        path: /etc/selinux/config
+        regexp: '^(SELINUX=).*'
+        replace: '\1permissive'
+      when: ansible_selinux['status'] == 'disabled'
+      become: true
+
+    - name: Create file to relabel selinux
+      ansible.builtin.file:
+        path: /.autorelabel
+        state: touch
+      when: ansible_selinux['status'] == 'disabled'
+      become: true
+
+    - name: Reboot_server
+      ansible.builtin.reboot:
+      become: true
+      when: ansible_selinux['status'] == 'disabled'
+
+    - name: Re-gather selinux facts
+      ansible.builtin.setup:
+        gather_subset:
+          - '!all'
+          - '!min'
+          - selinux
+
+    - name: Fix resolv.conf
+      when: ansible_selinux['status'] == 'enabled'
+      block:
+        - name: Remove immutable from resolv.conf
+          ansible.builtin.file:
+            path: /etc/resolv.conf
+            attributes: -i
+          become: true
+
+        - name: Restore context on /etc/resolv.conf
+          ansible.builtin.command:
+            cmd: restorecon -v /etc/resolv.conf
+          become: true
+
+        - name: Remove immutable from resolv.conf
+          ansible.builtin.file:
+            path: /etc/resolv.conf
+            attributes: +i
+          become: true
+
+        - name: Restart sssd
+          ansible.builtin.service:
+            name: sssd
+            state: restarted
+          become: true
+          when: inventory_hostname[0:4] != 'punr'
+
+    - name: Install prerequisites for selinux
+      ansible.builtin.package:
+        name: "{{ 'policycoreutils-python' if ansible_distribution_major_version == '7' else 'policycoreutils-python-utils' }}"
+        state: present
+      become: true
+
+    - name: Create user context
+      ansible.builtin.command:
+        cmd: "{{ item }}"
+      changed_when : true
+      become: true
+      loop:
+        - semanage user -m staff_u -R staff_r -R sysadm_r
+        - semanage user -m user_u -R user_r
