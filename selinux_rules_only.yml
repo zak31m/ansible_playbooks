@@ -1,0 +1,13 @@
+---
+- name: Create / update ruleset for SELINUX
+  hosts: all
+  gather_facts: false
+  tasks:
+  - name: Create user context
+    ansible.builtin.command:
+      cmd: "{{ item }}"
+    changed_when: true
+    become: true
+    loop:
+      - semanage user -m staff_u -R staff_r -R sysadm_r
+      - semanage user -m user_u -R user_r
