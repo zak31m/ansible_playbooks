@@ -1,0 +1,67 @@
+---
+- name: Fix orphaned files (owner/group)
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Find files with invalid owner on xfs and ext4 All FILES
+      ansible.builtin.command:
+        cmd: find / \( -fstype xfs -o -fstype ext4 \) -nouser -print -o -path /sys -prune -o -path /proc -prune -o -path /var/named -prune
+      ignore_errors: true
+      register: invalid_owner_file
+      become: true 
+
+    - name: Remove unowned files from /tmp and /var/tmp  
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ invalid_owner_file['stdout_lines'] }}"
+      when:
+        - "'/tmp/' in item or '/var/tmp/' in item"
+      become: true 
+
+    - name: Chown files with invalid owner
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: nobody
+      loop: "{{ invalid_owner_file['stdout_lines'] }}"
+      ignore_errors: true 
+      become: true
+
+    - name: find files with invalid group on xfs and ext4
+      ansible.builtin.command:
+        cmd: find / \( -fstype xfs -o -fstype ext4 \) -nogroup -print -o -path /sys -prune -o -path /proc -prune -o -path /var/named -prune
+      ignore_errors: true
+      register: invalid_group_files
+      become: true
+
+    - name: stat group-orphaned files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ invalid_group_files['stdout_lines'] }}"
+      become: true
+      register: stat_output
+
+    - name: Lookup primary group of user
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ item['stat']['uid'] }}"
+      loop: "{{ stat_output['results'] }}"
+      ignore_errors: true
+      register: getent_output
+
+    - name: Chown using user's primary group
+      ansible.builtin.file:
+        path: "{{ item['item']['item'] }}"
+        group: "{{ item['ansible_facts']['getent_passwd'] | dict2items | selectattr('key', 'defined') | map(attribute='value.2') | first }}"
+      loop: "{{ getent_output['results'] }}"
+      become: true
+      when: not item['failed'] | bool
+
+    - name: Chown files with invalid owner
+      ansible.builtin.file:
+        path: "{{ item['item']['item'] }}"
+        owner: nobody
+        group: nobody
+      loop: "{{ getent_output['results'] }}"
+      become: true
+      when: item['failed'] | bool
