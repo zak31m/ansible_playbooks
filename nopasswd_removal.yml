@@ -1,0 +1,59 @@
+---
+- name: Removed occurences of NOPASSWD from sudoers
+  hosts: all
+  gather_facts: true
+  gather_subset:
+    - '!all'
+    - '!min'
+    - date_time
+    - distribution_major_version
+  tasks:
+    - name: Exclude RHEL 7
+      ansible.builtin.assert:
+        that: ansible_distribution_major_version | int >= 8
+        fail_msg: "Must be RHEL 8 or higher"
+
+    - name: Find sudoers files
+      ansible.builtin.find:
+        paths: /etc/sudoers.d
+        contains: .*NOPASSWD.*
+        file_type: file
+      register: nopasswd_files
+      become: true
+
+    - name: Create backup dir
+      ansible.builtin.file:
+        path: /root/sudoers_bak/
+        state: directory
+        owner: root
+        group: root
+        mode: 0700
+      become: true
+
+    - name: Backup sudoers files
+      ansible.builtin.copy:
+        remote_src: true
+        src: "{{ item['path'] }}"
+        dest: "/root/sudoers_bak/{{ item['path'] | basename }}_{{ ansible_date_time['date'] }}"
+        owner: root
+        group: root
+        mode: 0600
+      loop: "{{ nopasswd_files['files'] }}"
+      become: true
+
+    - name: Change sudo entries in sudoers.d
+      ansible.builtin.replace:
+        path: "{{ item['path'] }}"
+        regexp: 'NOPASSWD'
+        replace: 'PASSWD'
+        validate: /usr/sbin/visudo -cf %s
+      loop: "{{ nopasswd_files['files'] }}"
+      become: true
+
+    - name: Change sudo entries in /etc/sudoers
+      ansible.builtin.replace:
+        path: /etc/sudoers
+        regexp: 'NOPASSWD'
+        replace: 'PASSWD'
+        validate: /usr/sbin/visudo -cf %s
+      become: true
