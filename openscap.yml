@@ -1,0 +1,176 @@
+---
+- hosts: all
+  gather_facts: true
+  gather_subset: min
+  tasks:
+    - name: Assert RHEL 7+
+      ansible.builtin.assert:
+        that: ansible_distribution_major_version >= '7'
+      tags: always
+
+    - name: Install openscap packages
+      ansible.builtin.package:
+        name:
+          - openscap-scanner
+          - openscap-utils
+          - scap-security-guide
+        state: latest
+      become: true
+      tags: setup
+
+    - name: Install ansible-core
+      ansible.builtin.package:
+        name: ansible-core
+        state: latest
+      become: true
+      when: ansible_distribution_major_version >= '8'
+      tags: setup
+
+    - name: Enable ansible repo for RHEL 7
+      community.general.rhsm_repository:
+        name: rhel-7-server-ansible-2.9-rpms
+        state: enabled
+      become: true
+      when: ansible_distribution_major_version == '7'
+      tags: setup
+
+    - name: Install ansible for RHEL 7
+      ansible.builtin.package:
+        name: ansible
+        state: latest
+      become: true
+      when: ansible_distribution_major_version == '7'
+      tags: setup
+
+    - name: Install ansible collections for playbook run
+      community.general.ansible_galaxy_install:
+        type: collection
+        name: "{{ item }}"
+      environment:
+        https_proxy: http://proxyout.usa-ed.net:8900
+      become: true
+      loop: 
+        - community.general
+        - ansible.posix
+      tags: setup
+
+    - name: Create /var/oscap directory
+      ansible.builtin.file: 
+        state: directory
+        path: /var/oscap
+        owner: root
+        group: root
+        mode: 0755
+      become: true
+      tags: setup
+
+    - name: Deploy custom profile
+      ansible.builtin.copy:
+        src: 'files/ssg-rhel{{ ansible_distribution_major_version }}-ds_custom.xml'
+        dest: /var/oscap/custom_profile.xml
+        owner: root
+        group: root
+        mode: 0600
+      become: true
+      tags: always
+
+    - name: Run initial scan
+      ansible.builtin.command:
+        cmd: 'oscap xccdf eval --fetch-remote-resources --profile xccdf_org.ssgproject.content_profile_stig --results-arf /tmp/arf.xml --report /var/oscap/benchmark.html /var/oscap/custom_profile.xml'
+      environment:
+        https_proxy: http://proxyout.usa-ed.net:8900
+      failed_when: benchmark_scan['rc'] > 2
+      register: benchmark_scan
+      no_log: true
+      become: true
+      tags: setup
+
+    - name: Deploy script to run daily scan
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          #This script will run daily/on-demand openscap scan for STIG remediation and generate remediation playbook
+          #The report is stored at: /var/oscap/current.html
+          export https_proxy=http://proxyout.usa-ed.net:8900
+          oscap xccdf eval --fetch-remote-resources --profile xccdf_org.ssgproject.content_profile_stig --results-arf /tmp/arf.xml --report /var/oscap/current.html /var/oscap/custom_profile.xml
+          oscap xccdf generate fix --fetch-remote-resources --fix-type ansible --result-id "" /tmp/arf.xml > /var/oscap/playbook.yml
+          rm -f /tmp/oscap.*
+        dest: /etc/cron.daily/oscap.sh
+        owner: root
+        group: root
+        mode: 0700
+      become: true
+      tags:
+        - on-demand
+        - setup
+
+    - name: Run scan
+      ansible.builtin.command:
+        cmd: /etc/cron.daily/oscap.sh
+      failed_when: current_scan['rc'] > 2
+      register: current_scan
+      no_log: true
+      become: true
+      tags: 
+        - on-demand
+        - setup
+
+    - name: Collect benchmark scap report
+      ansible.builtin.slurp:
+        src: "/var/oscap/benchmark.html"
+      become: true
+      register: benchmark
+      tags: always
+
+    - name: Collect current scap report
+      ansible.builtin.slurp:
+        src: "/var/oscap/current.html"
+      become: true
+      register: current
+      tags: always
+
+    - name: Collect scap remediation playbook
+      ansible.builtin.slurp:
+        src: "/var/oscap/playbook.yml"
+      become: true
+      register: playbook
+      tags: always
+
+    - name: Create host directory on Satellite
+      ansible.builtin.file:
+        path: '/var/www/html/pub/oscap/rhel{{ ansible_distribution_major_version }}/{{ ansible_hostname }}'
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+      delegate_to: punifisat010.usa-ed.net
+      become: true
+      tags: always
+
+    - name: Write files to Satellite
+      ansible.builtin.copy:
+        content: "{{ item['contents']['content'] | b64decode }}"
+        dest: "/var/www/html/pub/oscap/rhel{{ ansible_distribution_major_version }}/{{ ansible_hostname }}/{{ item['dest'] }}"
+        owner: root
+        group: root
+        mode: 0755
+      become: true
+      loop: 
+        - { contents: '{{ benchmark }}', dest: 'benchmark.html' }
+        - { contents: '{{ current }}', dest: 'current.html' }
+        - { contents: '{{ playbook }}', dest: 'playbook.yml' }
+      loop_control:
+        label: "{{ item['dest'] }}"
+      delegate_to: punifisat010.usa-ed.net
+      tags: always
+
+    - name: Write playbooks to Tower project
+      ansible.builtin.copy:
+        content: "{{ playbook['content'] | b64decode }}"
+        dest: "/var/lib/awx/oscap/{{ ansible_hostname }}.yml"
+        owner: awx
+        group: awx
+        group: 0640
+      become: true
+      delegate_to: punifiant020.usa-ed.net
+      tags: always
