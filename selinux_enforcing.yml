@@ -1,0 +1,50 @@
+---
+- name: Set selinux to enforcing
+  hosts: all
+  gather_facts: true
+  gather_subset:
+    - '!all'
+    - '!min'
+    - selinux
+  tasks:
+    - name: Install prerequisites for selinux
+      ansible.builtin.package:
+        name: policycoreutils-python
+        state: present
+      become: true
+
+    - name: Configure selinux to enforcing/targeted
+      ansible.posix.selinux:
+        state: enforcing
+        policy: targeted
+      notify:
+        - Restore context
+        - Set autorelabel
+      become: true
+
+    - name: Create user context
+      ansible.builtin.command:
+        cmd: "{{ item }}"
+      become: true
+      loop:
+        - semanage user -m staff_u -R staff_r -R sysadm_r
+        - semanage user -m user_u -R user_r
+
+  handlers:
+    - name: Restore context
+      ansible.builtin.command:
+        cmd: restorecon -R /
+      become: true
+      when: ansible_selinux['mode'] != 'disabled'
+
+    - name: Set autorelabel
+      ansible.builtin.file:
+        path: /.autorelabel
+        state: touch
+        mode: 0700
+      become: true
+      when:
+        - ansible_selinux['mode'] != 'enforcing' or
+          ansible_selinux['type'] != 'targeted' or
+          ansible_selinux['status'] != 'enabled'
+
